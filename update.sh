@@ -89,7 +89,7 @@ remove_unwanted_packages() {
         "luci-app-passwall" "luci-app-smartdns" "luci-app-ddns-go" "luci-app-rclone"
         "luci-app-ssr-plus" "luci-app-vssr" "luci-theme-argon" "luci-app-daed" "luci-app-dae"
         "luci-app-alist" "luci-app-argon-config" "luci-app-homeproxy" "luci-app-haproxy-tcp"
-        "luci-app-openclash" "luci-app-mihomo" "luci-app-appfilter"
+        "luci-app-openclash" "luci-app-mihomo" "luci-app-appfilter" "luci-app-msd_lite"
     )
     local packages_net=(
         "haproxy" "xray-core" "xray-plugin" "dns2socks" "alist" "hysteria"
@@ -97,6 +97,7 @@ remove_unwanted_packages() {
         "sing-box" "v2ray-core" "v2ray-geodata" "v2ray-plugin" "tuic-client"
         "chinadns-ng" "ipt2socks" "tcping" "trojan-plus" "simple-obfs"
         "shadowsocksr-libev" "dae" "daed" "mihomo" "geoview" "tailscale" "open-app-filter"
+        "msd_lite"
     )
     local small8_packages=(
         "ppp" "firewall" "dae" "daed" "daed-next" "libnftnl" "nftables" "dnsmasq"
@@ -117,6 +118,19 @@ remove_unwanted_packages() {
 
     if [[ -d ./package/istore ]]; then
         \rm -rf ./package/istore
+    fi
+
+    if grep -q "nss_packages" "$BUILD_DIR/$FEEDS_CONF"; then
+        local nss_packages_dirs=(
+            "$BUILD_DIR/feeds/luci/protocols/luci-proto-quectel"
+            "$BUILD_DIR/feeds/packages/net/quectel-cm"
+            "$BUILD_DIR/feeds/packages/kernel/quectel-qmi-wwan"
+        )
+        for dir in "${nss_packages_dirs[@]}"; do
+            if [[ -d "$dir" ]]; then
+                \rm -rf "$dir"
+            fi
+        done
     fi
 
     # 临时放一下，清理脚本
@@ -141,7 +155,7 @@ install_small8() {
         luci-app-store quickstart luci-app-quickstart luci-app-istorex luci-app-cloudflarespeedtest \
         luci-theme-argon netdata luci-app-netdata lucky luci-app-lucky luci-app-openclash luci-app-homeproxy \
         luci-app-amlogic nikki luci-app-nikki tailscale luci-app-tailscale oaf open-app-filter luci-app-oaf \
-        easytier luci-app-easytier
+        easytier luci-app-easytier msd_lite luci-app-msd_lite
 }
 
 install_feeds() {
@@ -151,6 +165,7 @@ install_feeds() {
         if [ -d "$dir" ] && [[ ! "$dir" == *.tmp ]] && [ ! -L "$dir" ]; then
             if [[ $(basename "$dir") == "small8" ]]; then
                 install_small8
+                install_fullconenat
             else
                 ./scripts/feeds install -f -ap $(basename "$dir")
             fi
@@ -177,7 +192,7 @@ fix_default_set() {
     fi
 }
 
-fix_miniupmpd() {
+fix_miniupnpd() {
     local miniupnpd_dir="$BUILD_DIR/feeds/packages/net/miniupnpd"
     local patch_file="999-chanage-default-leaseduration.patch"
 
@@ -192,12 +207,12 @@ change_dnsmasq2full() {
     fi
 }
 
-chk_fullconenat() {
+install_fullconenat() {
     if [ ! -d $BUILD_DIR/package/network/utils/fullconenat-nft ]; then
-        \cp -rf $BASE_PATH/fullconenat/fullconenat-nft $BUILD_DIR/package/network/utils
+        ./scripts/feeds install -p small8 -f fullconenat-nft
     fi
     if [ ! -d $BUILD_DIR/package/network/utils/fullconenat ]; then
-        \cp -rf $BASE_PATH/fullconenat/fullconenat $BUILD_DIR/package/network/utils
+        ./scripts/feeds install -p small8 -f fullconenat
     fi
 }
 
@@ -243,7 +258,7 @@ remove_something_nss_kmod() {
     fi
 
     if [ -f $ipq_mk_path ]; then
-        sed -i '/kmod-qca-nss-crypto/d' $ipq_mk_path
+        sed -i 's/kmod-qca-nss-crypto //g' $ipq_mk_path
         sed -i '/kmod-qca-nss-drv-eogremgr/d' $ipq_mk_path
         sed -i '/kmod-qca-nss-drv-gre/d' $ipq_mk_path
         sed -i '/kmod-qca-nss-drv-map-t/d' $ipq_mk_path
@@ -270,11 +285,13 @@ update_affinity_script() {
 }
 
 fix_build_for_openssl() {
-    local makefile="$BUILD_DIR/package/libs/openssl/Makefile"
-
-    if [[ -f "$makefile" ]]; then
-        if ! grep -qP "^CONFIG_OPENSSL_SSL3" "$makefile"; then
-            sed -i '/^ifndef CONFIG_OPENSSL_SSL3/i CONFIG_OPENSSL_SSL3 := y' "$makefile"
+    local openssl_dir="$BUILD_DIR/package/libs/openssl"
+    local makefile="$openssl_dir/Makefile"
+    if [ -d "$(dirname "$makefile")" ] && [ -f "$makefile" ]; then
+        if grep -q "3.0.16" "$makefile"; then
+            # 替换本地openssl版本
+            rm -rf "$openssl_dir"
+            cp -rf "$BASE_PATH/patches/openssl" "$openssl_dir"
         fi
     fi
 }
@@ -384,25 +401,16 @@ EOF
     chmod +x "$sh_dir/custom_task"
 }
 
-update_pw_ha_chk() {
-    local new_path="$BASE_PATH/patches/haproxy_check.sh"
+update_pw() {
     local pw_share_dir="$BUILD_DIR/feeds/small8/luci-app-passwall/root/usr/share/passwall"
-    local pw_ha_path="$pw_share_dir/haproxy_check.sh"
-    local ha_lua_path="$pw_share_dir/haproxy.lua"
     local smartdns_lua_path="$pw_share_dir/helper_smartdns_add.lua"
     local rules_dir="$pw_share_dir/rules"
-
-    # 修改 haproxy.lua 文件中的 rise 和 fall 参数
-    [ -f "$ha_lua_path" ] && sed -i 's/rise 1 fall 3/rise 3 fall 2/g' "$ha_lua_path"
 
     # 删除 helper_smartdns_add.lua 文件中的特定行
     [ -f "$smartdns_lua_path" ] && sed -i '/force-qtype-SOA 65/d' "$smartdns_lua_path"
 
-    # 从 chnlist 文件中删除特定的域名
-    sed -i '/\.bing\./d' "$rules_dir/chnlist"
-    sed -i '/microsoft/d' "$rules_dir/chnlist"
-    sed -i '/msedge/d' "$rules_dir/chnlist"
-    sed -i '/github/d' "$rules_dir/chnlist"
+    # 清空chnlist
+    [ -f "$rules_dir/chnlist" ] && echo "" >"$rules_dir/chnlist"
 }
 
 install_opkg_distfeeds() {
@@ -529,14 +537,6 @@ update_package() {
         sed -i 's/^PKG_HASH:=.*/PKG_HASH:='$PKG_HASH'/g' $mk_path
 
         echo "Update Package $1 to $PKG_VER $PKG_HASH"
-    fi
-}
-
-update_lucky() {
-    local mk_dir="$BUILD_DIR/feeds/small8/lucky/Makefile"
-    if [ -d "${mk_dir%/*}" ] && [ -f "$mk_dir" ]; then
-        sed -i '/Build\/Prepare/ a\	[ -f $(TOPDIR)/../patches/lucky_Linux_$(LUCKY_ARCH).tar.gz ] && install -Dm644 $(TOPDIR)/../patches/lucky_Linux_$(LUCKY_ARCH).tar.gz $(PKG_BUILD_DIR)/$(PKG_NAME)_$(PKG_VERSION)_Linux_$(LUCKY_ARCH).tar.gz' "$mk_dir"
-        sed -i '/wget/d' "$mk_dir"
     fi
 }
 
@@ -717,6 +717,33 @@ update_dns_app_menu_location() {
     fi
 }
 
+remove_easytier_web() {
+    local easytier_path="$BUILD_DIR/package/feeds/small8/easytier/Makefile"
+    if [ -d "${easytier_path%/*}" ] && [ -f "$easytier_path" ]; then
+        sed -i '/easytier-web/d' "$easytier_path"
+    fi
+}
+
+update_geoip() {
+    local geodata_path="$BUILD_DIR/package/feeds/small8/v2ray-geodata/Makefile"
+    if [ -d "${geodata_path%/*}" ] && [ -f "$geodata_path" ]; then
+        local GEOIP_VER=$(awk -F"=" '/GEOIP_VER:=/ {print $NF}' $geodata_path | grep -oE "[0-9]{1,}")
+        if [ -n "$GEOIP_VER" ]; then
+            local base_url="https://github.com/v2fly/geoip/releases/download/${GEOIP_VER}"
+            # 下载旧的geoip.dat和新的geoip-only-cn-private.dat文件的校验和
+            local old_SHA256=$(wget -qO- "$base_url/geoip.dat.sha256sum" | awk '{print $1}')
+            local new_SHA256=$(wget -qO- "$base_url/geoip-only-cn-private.dat.sha256sum" | awk '{print $1}')
+            # 更新Makefile中的文件名和校验和
+            if [ -n "$old_SHA256" ] && [ -n "$new_SHA256" ]; then
+                if grep -q "$old_SHA256" "$geodata_path"; then
+                    sed -i "s|=geoip.dat|=geoip-only-cn-private.dat|g" "$geodata_path"
+                    sed -i "s/$old_SHA256/$new_SHA256/g" "$geodata_path"
+                fi
+            fi
+        fi
+    fi
+}
+
 main() {
     clone_repo
     clean_up
@@ -725,10 +752,9 @@ main() {
     remove_unwanted_packages
     update_homeproxy
     fix_default_set
-    fix_miniupmpd
+    fix_miniupnpd
     update_golang
     change_dnsmasq2full
-    chk_fullconenat
     fix_mk_def_depends
     add_wifi_default_set
     update_default_lan_addr
@@ -741,7 +767,7 @@ main() {
     update_tcping
     add_ax6600_led
     set_custom_task
-    update_pw_ha_chk
+    update_pw
     install_opkg_distfeeds
     update_nss_pbuf_performance
     set_build_signature
@@ -750,7 +776,6 @@ main() {
     update_menu_location
     fix_compile_coremark
     update_dnsmasq_conf
-    # update_lucky
     add_backup_info_to_sysupgrade
     optimize_smartDNS
     update_mosdns_deconfig
@@ -761,6 +786,8 @@ main() {
     install_feeds
     support_fw4_adg
     update_script_priority
+    remove_easytier_web
+    update_geoip
     # update_proxy_app_menu_location
     # update_dns_app_menu_location
 }
